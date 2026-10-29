@@ -5,6 +5,7 @@ import contextvars
 import copy
 import dataclasses
 import inspect
+import json
 from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -758,7 +759,11 @@ class Agent(AgentBase, Generic[TContext]):
             base_message = f"Invalid JSON input for tool {tool_name}"
             validation_failed = False
             try:
-                parsed_params = params_adapter.validate_python(json_data)
+                try:
+                    parsed_params = params_adapter.validate_python(json_data)
+                except ValidationError:
+                    # Strict Pydantic types only accept JSON forms (dates, enums, ...) in JSON mode.
+                    parsed_params = params_adapter.validate_json(json.dumps(json_data))
             except ValidationError as exc:
                 if not _debug.DONT_LOG_TOOL_DATA:
                     raise ModelBehaviorError(f"{base_message}: {exc}") from exc

@@ -1986,6 +1986,19 @@ def _parse_function_tool_json_input(*, tool_name: str, input_json: str) -> dict[
     return parsed
 
 
+def _validate_function_tool_arguments(model: type[BaseModel], data: dict[str, Any]) -> BaseModel:
+    """Validate decoded tool arguments against the generated parameter model.
+
+    Python mode is tried first so existing tools keep their current values. Tool arguments are
+    JSON, though, and Pydantic strict mode only accepts the JSON form of enum, date, UUID and
+    tuple values in JSON mode, so a failed validation is retried there before it is reported.
+    """
+    try:
+        return model(**data) if data else model()
+    except ValidationError:
+        return model.model_validate_json(json.dumps(data))
+
+
 def _log_function_tool_invocation(*, tool_name: str, input_json: str) -> None:
     """Log the start of a tool invocation with the current redaction policy."""
     if _debug.DONT_LOG_TOOL_DATA:
@@ -2784,10 +2797,8 @@ def function_tool(
             base_message = f"Invalid JSON input for tool {tool_name}"
             validation_failed = False
             try:
-                parsed = (
-                    schema.params_pydantic_model(**validation_input)
-                    if validation_input
-                    else schema.params_pydantic_model()
+                parsed = _validate_function_tool_arguments(
+                    schema.params_pydantic_model, validation_input
                 )
             except ValidationError as e:
                 if not _debug.DONT_LOG_TOOL_DATA:
