@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
+import datetime
 import json
 from typing import Any, cast
 
@@ -10,7 +11,8 @@ import pytest
 from openai.types.responses import ResponseOutputMessage, ResponseOutputText, ResponseTextDeltaEvent
 from openai.types.responses.response_function_tool_call import ResponseFunctionToolCall
 from openai.types.responses.response_output_item import McpApprovalRequest
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+from pydantic.dataclasses import dataclass as pydantic_dataclass
 
 import agents._debug as _debug
 from agents import (
@@ -4233,3 +4235,91 @@ async def test_fresh_runs_isolate_nested_agent_tool_approvals(streamed: bool) ->
     assert executed[1][2] is first_done.context_wrapper.usage
     inner_model.assert_complete()
     outer_model.assert_complete()
+
+
+@pytest.mark.asyncio
+async def test_agent_as_tool_validates_strict_parameters_from_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Strict structured inputs accept the JSON forms of dates and tuples."""
+
+    class StrictInput(BaseModel):
+        model_config = ConfigDict(strict=True)
+
+        due: datetime.date
+        span: tuple[int, int]
+
+    agent = Agent(name="scheduler")
+    tool = agent.as_tool(
+        tool_name="schedule",
+        tool_description="Schedule work",
+        parameters=StrictInput,
+    )
+
+    captured: dict[str, Any] = {}
+
+    class DummyResult:
+        def __init__(self) -> None:
+            self.final_output = "ok"
+
+    async def fake_run(cls, starting_agent, input, **kwargs):
+        captured["input"] = input
+        return DummyResult()
+
+    monkeypatch.setattr(Runner, "run", classmethod(fake_run))
+
+    args = {"due": "2026-11-01", "span": [1, 2]}
+    tool_context = ToolContext(
+        context=None,
+        tool_name="schedule",
+        tool_call_id="call_strict",
+        tool_arguments=json.dumps(args),
+    )
+
+    output = await tool.on_invoke_tool(tool_context, json.dumps(args))
+
+    assert output == "ok"
+    assert json.loads(captured["input"]) == args
+
+
+@pydantic_dataclass(config=ConfigDict(strict=True))
+class _StrictNoteInput:
+    title: str
+    count: int
+
+
+@pytest.mark.asyncio
+async def test_agent_as_tool_validates_strict_dataclass_parameters_from_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = Agent(name="notes")
+    tool = agent.as_tool(
+        tool_name="add_note",
+        tool_description="Add a note",
+        parameters=_StrictNoteInput,
+    )
+
+    captured: dict[str, Any] = {}
+
+    class DummyResult:
+        def __init__(self) -> None:
+            self.final_output = "ok"
+
+    async def fake_run(cls, starting_agent, input, **kwargs):
+        captured["input"] = input
+        return DummyResult()
+
+    monkeypatch.setattr(Runner, "run", classmethod(fake_run))
+
+    args = {"title": "todo", "count": 2}
+    tool_context = ToolContext(
+        context=None,
+        tool_name="add_note",
+        tool_call_id="call_strict_dataclass",
+        tool_arguments=json.dumps(args),
+    )
+
+    output = await tool.on_invoke_tool(tool_context, json.dumps(args))
+
+    assert output == "ok"
+    assert json.loads(captured["input"]) == args

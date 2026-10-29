@@ -2,15 +2,21 @@ import asyncio
 import contextlib
 import copy
 import dataclasses
+import datetime
 import json
 import logging
 import time
+import uuid
 from collections.abc import Callable
+from decimal import Decimal
+from enum import Enum
+from pathlib import Path
 from typing import Annotated, Any, cast
 
 import pytest
 from jsonschema import Draft202012Validator
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+from pydantic.dataclasses import dataclass as pydantic_dataclass
 from typing_extensions import TypedDict
 
 import agents._debug as _debug
@@ -1762,3 +1768,140 @@ async def test_kwargs_key_colliding_with_param_is_reported_as_model_behavior_err
         )
 
     assert "'x'" in str(exc_info.value)
+
+
+class _StrictPriority(str, Enum):
+    HIGH = "high"
+    LOW = "low"
+
+
+class _StrictTicket(BaseModel):
+    model_config = ConfigDict(strict=True)
+
+    priority: _StrictPriority
+    due: datetime.date
+    ticket_id: uuid.UUID
+    span: tuple[int, int]
+
+
+@pytest.mark.asyncio
+async def test_function_tool_validates_strict_model_arguments_from_json() -> None:
+    """Strict Pydantic params accept the JSON forms their own schema advertises."""
+
+    def create_ticket(ticket: _StrictTicket) -> str:
+        return f"{ticket.priority.value} {ticket.due.isoformat()} {ticket.ticket_id} {ticket.span}"
+
+    tool = function_tool(create_ticket, failure_error_function=None)
+    ticket_id = "12345678-1234-5678-1234-567812345678"
+    arguments = json.dumps(
+        {
+            "ticket": {
+                "priority": "high",
+                "due": "2026-11-01",
+                "ticket_id": ticket_id,
+                "span": [1, 2],
+            }
+        }
+    )
+
+    result = await tool.on_invoke_tool(
+        ToolContext(None, tool_name=tool.name, tool_call_id="1", tool_arguments=arguments),
+        arguments,
+    )
+
+    assert result == f"high 2026-11-01 {ticket_id} (1, 2)"
+
+
+@pytest.mark.asyncio
+async def test_function_tool_validates_strict_field_arguments_from_json() -> None:
+    def schedule(when: Annotated[datetime.datetime, Field(strict=True)]) -> str:
+        return when.isoformat()
+
+    tool = function_tool(schedule, failure_error_function=None)
+    arguments = '{"when": "2026-11-01T10:00:00"}'
+
+    result = await tool.on_invoke_tool(
+        ToolContext(None, tool_name=tool.name, tool_call_id="1", tool_arguments=arguments),
+        arguments,
+    )
+
+    assert result == "2026-11-01T10:00:00"
+
+
+@pytest.mark.asyncio
+async def test_function_tool_strict_arguments_still_reject_invalid_json_values() -> None:
+    def create_ticket(ticket: _StrictTicket) -> str:
+        return "unreachable"
+
+    tool = function_tool(create_ticket, failure_error_function=None)
+    arguments = json.dumps(
+        {
+            "ticket": {
+                "priority": "urgent",
+                "due": "2026-11-01",
+                "ticket_id": "12345678-1234-5678-1234-567812345678",
+                "span": [1, 2],
+            }
+        }
+    )
+
+    with pytest.raises(ModelBehaviorError):
+        await tool.on_invoke_tool(
+            ToolContext(None, tool_name=tool.name, tool_call_id="1", tool_arguments=arguments),
+            arguments,
+        )
+
+
+@pytest.mark.asyncio
+async def test_function_tool_keeps_python_mode_values_for_non_strict_arguments() -> None:
+    """Arguments that validate today keep their values; JSON mode is only a fallback."""
+
+    def save(path: Path | str, amount: Decimal) -> str:
+        return f"{type(path).__name__}:{path} {amount!r}"
+
+    tool = function_tool(save, failure_error_function=None)
+    arguments = '{"path": "notes.txt", "amount": 5.0}'
+
+    result = await tool.on_invoke_tool(
+        ToolContext(None, tool_name=tool.name, tool_call_id="1", tool_arguments=arguments),
+        arguments,
+    )
+
+    assert result == "str:notes.txt Decimal('5.0')"
+
+
+@pydantic_dataclass(config=ConfigDict(strict=True))
+class _StrictNote:
+    title: str
+    count: int
+
+
+@pytest.mark.asyncio
+async def test_function_tool_validates_strict_dataclass_arguments_from_json() -> None:
+    def add_note(note: _StrictNote) -> str:
+        return f"{note.title}:{note.count}"
+
+    tool = function_tool(add_note, failure_error_function=None)
+    arguments = '{"note": {"title": "todo", "count": 2}}'
+
+    result = await tool.on_invoke_tool(
+        ToolContext(None, tool_name=tool.name, tool_call_id="1", tool_arguments=arguments),
+        arguments,
+    )
+
+    assert result == "todo:2"
+
+
+@pytest.mark.asyncio
+async def test_function_tool_strict_int_still_rejects_string() -> None:
+    def count(n: Annotated[int, Field(strict=True)]) -> int:
+        return n
+
+    tool = function_tool(count, failure_error_function=None)
+    arguments = '{"n": "5"}'
+
+    with pytest.raises(ModelBehaviorError):
+        await tool.on_invoke_tool(
+            ToolContext(None, tool_name=tool.name, tool_call_id="1", tool_arguments=arguments),
+            arguments,
+        )
